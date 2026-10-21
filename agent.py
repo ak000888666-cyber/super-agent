@@ -15,6 +15,7 @@ from pypdf import PdfReader
 from dotenv import load_dotenv
 import aiohttp as aiohttp_client
 import urllib.parse
+from PIL import Image
 
 load_dotenv()
 logging.basicConfig(level=logging.INFO)
@@ -75,7 +76,7 @@ async def save_summary(user_id, summary):
 # --- إعداد الذكاء الاصطناعي ---
 llm = ChatGroq(temperature=0.5, groq_api_key=GROQ_API_KEY, model_name="openai/gpt-oss-20b")
 
-# موديل الرؤية (صيغة حديثة)
+# موديل الرؤية (المدعوم رسمياً للصور)
 vision_llm = ChatGroq(temperature=0.3, groq_api_key=GROQ_API_KEY, model_name="meta-llama/llama-4-scout-17b-16e-instruct")
 
 client = AsyncGroq(api_key=GROQ_API_KEY)
@@ -185,7 +186,7 @@ async def handle_text(message: types.Message):
         logging.error(f"Error: {e}")
         await message.answer("أوه، صار خطأ بسيط. جرب مرة ثانية.")
 
-# --- الصور ---
+# --- الصور (مع الضغط) ---
 @dp.message(F.photo)
 async def handle_photo(message: types.Message):
     user_id = message.from_user.id
@@ -195,10 +196,18 @@ async def handle_photo(message: types.Message):
         file_info = await bot.get_file(photo.file_id)
         downloaded_file = await bot.download_file(file_info.file_path)
         
-        # تجهيز الصورة كـ Base64
-        image_data = base64.b64encode(downloaded_file.read()).decode("utf-8")
+        # ضغط الصورة قبل الإرسال
+        img = Image.open(io.BytesIO(downloaded_file.read()))
+        img.thumbnail((1024, 1024)) # تصغير الأبعاد
+        if img.mode != 'RGB':
+            img = img.convert('RGB')
         
-        # إرسال الطلب للموديل بالصيغة الصحيحة
+        buffer = io.BytesIO()
+        img.save(buffer, format="JPEG", quality=85) # ضغط الجودة
+        compressed_bytes = buffer.getvalue()
+        
+        image_data = base64.b64encode(compressed_bytes).decode("utf-8")
+        
         response = await vision_llm.ainvoke([
             {
                 "role": "user", 
