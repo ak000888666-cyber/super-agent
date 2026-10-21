@@ -1,8 +1,10 @@
 aiogram
 python-dotenv
+aiosqlite
 langchain
 langchain-groq
 langchain-community
 ddgs
 aiohttp
-aiosqlite
+groq
+pypdf
