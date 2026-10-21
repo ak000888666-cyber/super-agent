@@ -42,28 +42,44 @@ async def save_message(user_id, role, content):
         )
         await db.commit()
 
-# --- إعداد الذكاء الاصطناعي (الموديل الشغال الوحيد) ---
+async def get_last_message(user_id):
+    """جلب آخر رسالة فقط (سؤال أو جواب) لتجنب أخطاء Groq"""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT role, content FROM chat_history WHERE user_id = ? ORDER BY id DESC LIMIT 1",
+            (user_id,)
+        ) as cursor:
+            row = await cursor.fetchone()
+            if row:
+                return [{"role": row["role"], "content": row["content"]}]
+            return []
+
+# --- إعداد الذكاء الاصطناعي ---
 llm = ChatGroq(
-    temperature=0.7, 
+    temperature=0.5, 
     groq_api_key=GROQ_API_KEY, 
-    model_name="openai/gpt-oss-20b"  # الموديل الوحيد الشغال مجاناً
+    model_name="openai/gpt-oss-20b"
 )
 
-# تعليمات الشخصية (System Prompt)
+# تعليمات الشخصية (System Prompt) - معدلة بدقة
 system_prompt = """أنت وكيل ذكاء اصطناعي شخصي، اسمك "سوبر". 
-أنت ودود، متفاعل، وتستخدم الإيموجي المناسبة للموقف (😊، 🤔، 📝، 💡، 🔍). 
-- إذا كان الطلب غير واضح، اسأل المستخدم: "هل تريد ملخصاً سريعاً أم شرحاً كاملاً؟".
-- إذا طلب منك شيئاً لا تستطيع فعله (مثل البحث المباشر)، اعتذر بلطف وقدم بديلاً.
-- كن صبوراً، واشرح بأسلوب مبسط. لا تعلق أبداً، وإذا لم تفهم شيئاً، اطلب توضيحاً.
-- إذا طلب منك المستخدم تغيير اسمك، التزم بالاسم الجديد.
-- استخدم لغة عربية سليمة ومنظمة."""
+أنت ودود، متفاعل، وتستخدم الإيموجي المناسبة للموقف (😊، 🤔، 📝، 💡).
+
+قواعد صارمة يجب اتباعها:
+1. إذا كان الطلب غامضاً جداً (مثل: "اشرح لي هذا")، اسأل: "هل تريد ملخصاً سريعاً أم شرحاً كاملاً؟".
+2. إذا اختار المستخدم (ملخص) أو (شرح كامل)، قدم المطلوب مباشرةً، ولا تكرر السؤال أبداً.
+3. لا تصحح أخطاء المستخدم الإملائية، بل افهم قصده وصححها ضمنياً في ردك.
+4. إذا كان الرد طويلاً (أكثر من 3 نقاط)، قدمه على شكل خطوات قصيرة (خطوة 1، خطوة 2...)، وانتظر موافقة المستخدم قبل الانتقال للخطوة التالية.
+5. لا تعلق أبداً، وإذا لم تفهم شيئاً، اطلب توضيحاً.
+6. استخدم لغة عربية سليمة ومنظمة."""
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
-    await message.answer("أهلاً بك! أنا وكيلك الذكي الشخصي. يمكنك مناداتي بأي اسم تريده. اسألني أي شي، وسأكون معك خطوة بخطوة! 🤖✨")
+    await message.answer("أهلاً بك! أنا وكيلك الذكي الشخصي. اسألني أي شي، وسأكون معك خطوة بخطوة! 🤖✨")
 
 @dp.message(F.text)
 async def handle_message(message: types.Message):
@@ -73,22 +89,25 @@ async def handle_message(message: types.Message):
     await message.answer("🧠 جاري التفكير...")
 
     try:
-        # إرسال السؤال فقط (بدون تاريخ المحادثة) لتجنب أخطاء Groq
-        messages = [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_text}
-        ]
+        # جلب آخر رسالة فقط (للسياق)
+        last_msg = await get_last_message(user_id)
+        
+        # تجهيز الرسائل
+        messages = [{"role": "system", "content": system_prompt}]
+        messages.extend(last_msg) # إضافة آخر رسالة فقط
+        messages.append({"role": "user", "content": user_text})
         
         response = await llm.ainvoke(messages)
         reply = response.content
         
+        # حفظ في قاعدة البيانات
         await save_message(user_id, "user", user_text)
         await save_message(user_id, "assistant", reply)
         
         await message.answer(reply)
     except Exception as e:
         logging.error(f"Error: {e}")
-        await message.answer("⚠️ عذراً، حدث خطأ بسيط. جرب مرة ثانية، أنا معك! 💪")
+        await message.answer("⚠️ عذراً، حدث خطأ بسيط. جرب مرة ثانية! 💪")
 
 # --- إعداد السيرفر والويب هوك ---
 async def on_startup(app):
