@@ -54,8 +54,8 @@ async def get_history(user_id, limit=10):
             rows = await cursor.fetchall()
             return [{"role": row["role"], "content": row["content"]} for row in reversed(rows)]
 
-# --- إعداد الذكاء الاصطناعي ---
-llm = ChatGroq(temperature=0.3, groq_api_key=GROQ_API_KEY, model_name="llama-3.3-70b-versatile")
+# --- إعداد الذكاء الاصطناعي (تم تغيير الموديل هنا) ---
+llm = ChatGroq(temperature=0.3, groq_api_key=GROQ_API_KEY, model_name="openai/gpt-oss-120b")
 tools = [DuckDuckGoSearchRun()]
 agent = create_agent(
     model=llm,
@@ -78,7 +78,7 @@ async def handle_message(message: types.Message):
     await message.answer("🧠 جاري التفكير والبحث...")
 
     try:
-        # جلب السجل السابق
+        # جلب السجل السابق من قاعدة البيانات
         history = await get_history(user_id)
         
         # إضافة رسالة المستخدم للسجل
