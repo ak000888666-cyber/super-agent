@@ -2,11 +2,14 @@ import os
 import logging
 import asyncio
 import aiosqlite
+import base64
+from io import BytesIO
 from aiohttp import web
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler
 from langchain_groq import ChatGroq
+from groq import AsyncGroq
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -42,7 +45,7 @@ async def save_message(user_id, role, content):
         )
         await db.commit()
 
-async def get_history(user_id, limit=6):  # 6 رسائل (3 أسئلة + 3 أجوبة)
+async def get_history(user_id, limit=6):
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
@@ -59,54 +62,116 @@ llm = ChatGroq(
     model_name="openai/gpt-oss-20b"
 )
 
-# تعليمات الشخصية (System Prompt) - منظمة وذكية
-system_prompt = """أنت وكيل ذكاء اصطناعي شخصي، اسمك "سوبر". أنت ودود، تستخدم الإيموجي (😊، 🤔، 📝).
+# موديل الرؤية
+vision_llm = ChatGroq(
+    temperature=0.3,
+    groq_api_key=GROQ_API_KEY,
+    model_name="meta-llama/llama-4-scout-17b-16e-instruct"
+)
 
-قواعد صارمة:
-1. لا تسأل "هل تريد ملخصاً أم شرحاً كاملاً" إلا إذا كان الطلب غامضاً جداً (مثل: "اشرح لي هذا").
-2. إذا اختار المستخدم (ملخص) أو (شرح كامل)، قدم المطلوب مباشرةً، ولا تكرر السؤال نهائياً.
-3. إذا كان الطلب واضحاً (مثل: "ابغا اسوي بوت")، ابدأ بالخطوات فوراً دون سؤال.
-4. لا تصحح أخطاء المستخدم الإملائية، بل افهم قصده.
-5. إذا كان الرد طويلاً، قدمه على شكل خطوات قصيرة (1، 2، 3)، وانتظر موافقة المستخدم.
-6. لا تستخدم الجداول (|) أو أي رموز Markdown مثل ** أو ##. استخدم النقاط العادية (1، 2، 3) أو (-) فقط.
-7. لا تستخدم وسوم HTML مثل <br> أو <b>.
-8. استخدم لغة عربية سليمة.
-9. تذكر سياق المحادثة السابقة، ولا تنسَ ما قاله المستخدم."""
+# عميل Groq (للصوت)
+client = AsyncGroq(api_key=GROQ_API_KEY)
+
+system_prompt = """أنت وكيل ذكاء اصطناعي شخصي، اسمك "سوبر". أنت ودود، تستخدم الإيموجي (😊، 🤔، 📝).
+قواعد:
+1. إذا كان الطلب غامضاً جداً، اسأل "ملخص أم شرح كامل؟".
+2. لا تكرر السؤال إذا اختار المستخدم.
+3. إذا كان الطلب واضحاً، ابدأ فوراً.
+4. لا تصحح أخطاء الإملاء.
+5. قدم الخطوات الطويلة على شكل نقاط وانتظر الموافقة.
+6. لا تستخدم الجداول (|) أو رموز Markdown مثل ** أو ##. استخدم (1، 2، 3) أو (-).
+7. لا تستخدم وسوم HTML.
+8. استخدم لغة عربية سليمة."""
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
-    await message.answer("أهلاً بك! أنا وكيلك الذكي الشخصي. اسألني أي شي، وسأكون معك خطوة بخطوة! 🤖✨")
+    await message.answer("أهلاً بك! أنا وكيلك الذكي الشخصي. اسألني أي شي، أو أرسل لي صورة أو رسالة صوتية! 🤖✨")
 
+# --- معالجة النصوص ---
 @dp.message(F.text)
-async def handle_message(message: types.Message):
+async def handle_text(message: types.Message):
     user_id = message.from_user.id
     user_text = message.text
-
     await message.answer("🧠 جاري التفكير...")
-
     try:
-        # جلب آخر 6 رسائل (للسياق)
         history = await get_history(user_id)
-        
-        # تجهيز الرسائل
         messages = [{"role": "system", "content": system_prompt}]
         messages.extend(history)
         messages.append({"role": "user", "content": user_text})
-        
         response = await llm.ainvoke(messages)
         reply = response.content
-        
-        # حفظ في قاعدة البيانات
         await save_message(user_id, "user", user_text)
         await save_message(user_id, "assistant", reply)
-        
         await message.answer(reply)
     except Exception as e:
         logging.error(f"Error: {e}")
         await message.answer("⚠️ عذراً، حدث خطأ بسيط. جرب مرة ثانية! 💪")
+
+# --- معالجة الصور ---
+@dp.message(F.photo)
+async def handle_photo(message: types.Message):
+    user_id = message.from_user.id
+    await message.answer("🖼️ جاري تحليل الصورة...")
+    try:
+        photo = message.photo[-1]
+        file_info = await bot.get_file(photo.file_id)
+        downloaded_file = await bot.download_file(file_info.file_path)
+        image_data = base64.b64encode(downloaded_file.read()).decode("utf-8")
+        
+        response = await vision_llm.ainvoke([
+            {"role": "user", "content": [
+                {"type": "text", "text": "حلل هذه الصورة واشرح محتواها باللغة العربية. إذا كانت تحتوي على نص، اقرأه واشرحه."},
+                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_data}"}}
+            ]}
+        ])
+        
+        reply = response.content
+        await save_message(user_id, "user", "[صورة]")
+        await save_message(user_id, "assistant", reply)
+        await message.answer(reply)
+    except Exception as e:
+        logging.error(f"Vision Error: {e}")
+        await message.answer("⚠️ عذراً، لم أستطع تحليل الصورة. تأكد من وضوحها وحاول مرة ثانية. 💪")
+
+# --- معالجة الصوت ---
+@dp.message(F.voice)
+async def handle_voice(message: types.Message):
+    user_id = message.from_user.id
+    await message.answer("🎤 جاري تحويل الصوت إلى نص...")
+    try:
+        file = await bot.get_file(message.voice.file_id)
+        buffer = BytesIO()
+        await bot.download_file(file.file_path, destination=buffer)
+        buffer.name = "voice.ogg"
+        buffer.seek(0)
+        
+        transcription = await client.audio.transcriptions.create(
+            model="whisper-large-v3",
+            file=buffer,
+            language="ar"
+        )
+        
+        text = transcription.text
+        await message.answer(f"📝 النص: {text}\n\n🧠 جاري التفكير...")
+        
+        history = await get_history(user_id)
+        messages = [{"role": "system", "content": system_prompt}]
+        messages.extend(history)
+        messages.append({"role": "user", "content": text})
+        
+        response = await llm.ainvoke(messages)
+        reply = response.content
+        
+        await save_message(user_id, "user", f"[صوت] {text}")
+        await save_message(user_id, "assistant", reply)
+        await message.answer(reply)
+        
+    except Exception as e:
+        logging.error(f"Voice Error: {e}")
+        await message.answer("⚠️ عذراً، لم أستطع فهم الصوت. تأكد من وضوح التسجيل وحاول مرة ثانية. 💪")
 
 # --- إعداد السيرفر والويب هوك ---
 async def on_startup(app):
