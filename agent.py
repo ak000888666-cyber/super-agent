@@ -62,11 +62,11 @@ llm = ChatGroq(
     model_name="openai/gpt-oss-20b"
 )
 
-# موديل الرؤية
+# موديل الرؤية (الأقوى حالياً)
 vision_llm = ChatGroq(
     temperature=0.3,
     groq_api_key=GROQ_API_KEY,
-    model_name="meta-llama/llama-4-scout-17b-16e-instruct"
+    model_name="meta-llama/llama-4-maverick-17b-128e-instruct"
 )
 
 # عميل Groq (للصوت)
