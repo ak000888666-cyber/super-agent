@@ -42,17 +42,15 @@ async def save_message(user_id, role, content):
         )
         await db.commit()
 
-async def get_last_message(user_id):
+async def get_history(user_id, limit=6):  # 6 رسائل (3 أسئلة + 3 أجوبة)
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
-            "SELECT role, content FROM chat_history WHERE user_id = ? ORDER BY id DESC LIMIT 1",
-            (user_id,)
+            "SELECT role, content FROM chat_history WHERE user_id = ? ORDER BY id DESC LIMIT ?",
+            (user_id, limit)
         ) as cursor:
-            row = await cursor.fetchone()
-            if row:
-                return [{"role": row["role"], "content": row["content"]}]
-            return []
+            rows = await cursor.fetchall()
+            return [{"role": row["role"], "content": row["content"]} for row in reversed(rows)]
 
 # --- إعداد الذكاء الاصطناعي ---
 llm = ChatGroq(
@@ -61,23 +59,19 @@ llm = ChatGroq(
     model_name="openai/gpt-oss-20b"
 )
 
-# تعليمات الشخصية (System Prompt) - معدلة للتنسيق النظيف
-system_prompt = """أنت وكيل ذكاء اصطناعي شخصي، اسمك "سوبر". 
-أنت ودود، متفاعل، وتستخدم الإيموجي المناسبة للموقف (😊، 🤔، 📝، 💡).
+# تعليمات الشخصية (System Prompt) - منظمة وذكية
+system_prompt = """أنت وكيل ذكاء اصطناعي شخصي، اسمك "سوبر". أنت ودود، تستخدم الإيموجي (😊، 🤔، 📝).
 
-قواعد صارمة يجب اتباعها:
-1. إذا كان الطلب غامضاً جداً، اسأل: "هل تريد ملخصاً سريعاً أم شرحاً كاملاً؟".
-2. إذا اختار المستخدم (ملخص) أو (شرح كامل)، قدم المطلوب مباشرةً، ولا تكرر السؤال أبداً.
-3. لا تصحح أخطاء المستخدم الإملائية، بل افهم قصده.
-4. إذا كان الرد طويلاً، قدمه على شكل خطوات قصيرة (1، 2، 3)، وانتظر موافقة المستخدم.
-5. لا تعلق أبداً، وإذا لم تفهم شيئاً، اطلب توضيحاً.
-6. استخدم لغة عربية سليمة ومنظمة.
-
-تنسيق النص (هام جداً):
-- لا تستخدم الجداول (|) أو الأقواس المعقوفة أو أي رموز Markdown مثل ** أو ##.
-- استخدم النقاط العادية (1، 2، 3) أو (-) فقط.
-- اترك سطراً فارغاً بين كل فكرة وفكرة.
-- لا تستخدم وسوم HTML مثل <br> أو <b>."""
+قواعد صارمة:
+1. لا تسأل "هل تريد ملخصاً أم شرحاً كاملاً" إلا إذا كان الطلب غامضاً جداً (مثل: "اشرح لي هذا").
+2. إذا اختار المستخدم (ملخص) أو (شرح كامل)، قدم المطلوب مباشرةً، ولا تكرر السؤال نهائياً.
+3. إذا كان الطلب واضحاً (مثل: "ابغا اسوي بوت")، ابدأ بالخطوات فوراً دون سؤال.
+4. لا تصحح أخطاء المستخدم الإملائية، بل افهم قصده.
+5. إذا كان الرد طويلاً، قدمه على شكل خطوات قصيرة (1، 2، 3)، وانتظر موافقة المستخدم.
+6. لا تستخدم الجداول (|) أو أي رموز Markdown مثل ** أو ##. استخدم النقاط العادية (1، 2، 3) أو (-) فقط.
+7. لا تستخدم وسوم HTML مثل <br> أو <b>.
+8. استخدم لغة عربية سليمة.
+9. تذكر سياق المحادثة السابقة، ولا تنسَ ما قاله المستخدم."""
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
@@ -94,14 +88,18 @@ async def handle_message(message: types.Message):
     await message.answer("🧠 جاري التفكير...")
 
     try:
-        last_msg = await get_last_message(user_id)
+        # جلب آخر 6 رسائل (للسياق)
+        history = await get_history(user_id)
+        
+        # تجهيز الرسائل
         messages = [{"role": "system", "content": system_prompt}]
-        messages.extend(last_msg)
+        messages.extend(history)
         messages.append({"role": "user", "content": user_text})
         
         response = await llm.ainvoke(messages)
         reply = response.content
         
+        # حفظ في قاعدة البيانات
         await save_message(user_id, "user", user_text)
         await save_message(user_id, "assistant", reply)
         
