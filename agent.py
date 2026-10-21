@@ -42,7 +42,7 @@ async def save_message(user_id, role, content):
         )
         await db.commit()
 
-async def get_history(user_id, limit=10):
+async def get_history(user_id, limit=2):  # رسالتين بس لتجنب أخطاء Groq
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
@@ -52,19 +52,28 @@ async def get_history(user_id, limit=10):
             rows = await cursor.fetchall()
             return [{"role": row["role"], "content": row["content"]} for row in reversed(rows)]
 
-# --- إعداد الذكاء الاصطناعي (بدون أدوات) ---
+# --- إعداد الذكاء الاصطناعي (موديل مستقر + شخصية تفاعلية) ---
 llm = ChatGroq(
-    temperature=0.3, 
-    groq_api_key=GROQ_API_KEY, 
-    model_name="openai/gpt-oss-120b"
+    temperature=0.7, # زيادة الإبداع والتفاعل
+    groq_api_key=GROQ_API_KEY,
+    model_name="llama-3.1-8b-instant"
 )
+
+# تعليمات الشخصية (System Prompt)
+system_prompt = """أنت وكيل ذكاء اصطناعي شخصي، اسمك "سوبر" (أو الاسم الذي يطلبه المستخدم). 
+أنت ودود، متفاعل، وتستخدم الإيموجي المناسبة للموقف (😊، 🤔، 📝، 💡، 🔍). 
+- إذا كان الطلب غير واضح، اسأل المستخدم: "هل تريد ملخصاً سريعاً أم شرحاً كاملاً؟".
+- إذا طلب منك شيئاً لا تستطيع فعله (مثل البحث المباشر أو تشغيل كود)، اعتذر بلطف وقدم بديلاً (مثل: "لا أستطيع البحث المباشر، لكن يمكنني مساعدتك في صياغة سؤالك أو شرح مفهوم البحث").
+- كن صبوراً، واشرح بأسلوب مبسط. لا تعلق أبداً، وإذا لم تفهم شيئاً، اطلب توضيحاً.
+- إذا طلب منك المستخدم تغيير اسمك، التزم بالاسم الجديد.
+- استخدم لغة عربية سليمة ومنظمة."""
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
-    await message.answer("أهلاً بك! أنا وكيلك الذكي الخارق، وأتذكر محادثاتنا. اسألني أي شي. 🤖🔍")
+    await message.answer("أهلاً بك! أنا وكيلك الذكي الشخصي. يمكنك مناداتي بأي اسم تريده. اسألني أي شي، وسأكون معك خطوة بخطوة! 🤖✨")
 
 @dp.message(F.text)
 async def handle_message(message: types.Message):
@@ -74,24 +83,26 @@ async def handle_message(message: types.Message):
     await message.answer("🧠 جاري التفكير...")
 
     try:
-        # جلب السجل السابق من قاعدة البيانات
+        # جلب السجل السابق
         history = await get_history(user_id)
         
-        # إضافة رسالة المستخدم للسجل
-        history.append({"role": "user", "content": user_text})
+        # تجهيز الرسائل مع تعليمات الشخصية
+        messages = [{"role": "system", "content": system_prompt}]
+        messages.extend(history)
+        messages.append({"role": "user", "content": user_text})
         
-        # إرسال الطلب للذكاء الاصطناعي مباشرة
-        response = await llm.ainvoke(history)
+        # إرسال الطلب
+        response = await llm.ainvoke(messages)
         reply = response.content
         
-        # حفظ الرد في قاعدة البيانات
+        # حفظ في قاعدة البيانات
         await save_message(user_id, "user", user_text)
         await save_message(user_id, "assistant", reply)
         
         await message.answer(reply)
     except Exception as e:
         logging.error(f"Error: {e}")
-        await message.answer("⚠️ حدث خطأ، جرب مرة ثانية.")
+        await message.answer("⚠️ عذراً، حدث خطأ بسيط. جرب مرة ثانية، أنا معك! 💪")
 
 # --- إعداد السيرفر والويب هوك ---
 async def on_startup(app):
