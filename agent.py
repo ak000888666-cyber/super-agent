@@ -43,7 +43,6 @@ async def save_message(user_id, role, content):
         await db.commit()
 
 async def get_last_message(user_id):
-    """جلب آخر رسالة فقط (سؤال أو جواب) لتجنب أخطاء Groq"""
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
@@ -62,17 +61,23 @@ llm = ChatGroq(
     model_name="openai/gpt-oss-20b"
 )
 
-# تعليمات الشخصية (System Prompt) - معدلة بدقة
+# تعليمات الشخصية (System Prompt) - معدلة للتنسيق النظيف
 system_prompt = """أنت وكيل ذكاء اصطناعي شخصي، اسمك "سوبر". 
 أنت ودود، متفاعل، وتستخدم الإيموجي المناسبة للموقف (😊، 🤔، 📝، 💡).
 
 قواعد صارمة يجب اتباعها:
-1. إذا كان الطلب غامضاً جداً (مثل: "اشرح لي هذا")، اسأل: "هل تريد ملخصاً سريعاً أم شرحاً كاملاً؟".
+1. إذا كان الطلب غامضاً جداً، اسأل: "هل تريد ملخصاً سريعاً أم شرحاً كاملاً؟".
 2. إذا اختار المستخدم (ملخص) أو (شرح كامل)، قدم المطلوب مباشرةً، ولا تكرر السؤال أبداً.
-3. لا تصحح أخطاء المستخدم الإملائية، بل افهم قصده وصححها ضمنياً في ردك.
-4. إذا كان الرد طويلاً (أكثر من 3 نقاط)، قدمه على شكل خطوات قصيرة (خطوة 1، خطوة 2...)، وانتظر موافقة المستخدم قبل الانتقال للخطوة التالية.
+3. لا تصحح أخطاء المستخدم الإملائية، بل افهم قصده.
+4. إذا كان الرد طويلاً، قدمه على شكل خطوات قصيرة (1، 2، 3)، وانتظر موافقة المستخدم.
 5. لا تعلق أبداً، وإذا لم تفهم شيئاً، اطلب توضيحاً.
-6. استخدم لغة عربية سليمة ومنظمة."""
+6. استخدم لغة عربية سليمة ومنظمة.
+
+تنسيق النص (هام جداً):
+- لا تستخدم الجداول (|) أو الأقواس المعقوفة أو أي رموز Markdown مثل ** أو ##.
+- استخدم النقاط العادية (1، 2، 3) أو (-) فقط.
+- اترك سطراً فارغاً بين كل فكرة وفكرة.
+- لا تستخدم وسوم HTML مثل <br> أو <b>."""
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
@@ -89,18 +94,14 @@ async def handle_message(message: types.Message):
     await message.answer("🧠 جاري التفكير...")
 
     try:
-        # جلب آخر رسالة فقط (للسياق)
         last_msg = await get_last_message(user_id)
-        
-        # تجهيز الرسائل
         messages = [{"role": "system", "content": system_prompt}]
-        messages.extend(last_msg) # إضافة آخر رسالة فقط
+        messages.extend(last_msg)
         messages.append({"role": "user", "content": user_text})
         
         response = await llm.ainvoke(messages)
         reply = response.content
         
-        # حفظ في قاعدة البيانات
         await save_message(user_id, "user", user_text)
         await save_message(user_id, "assistant", reply)
         
