@@ -75,30 +75,31 @@ async def save_summary(user_id, summary):
 # --- إعداد الذكاء الاصطناعي ---
 llm = ChatGroq(temperature=0.5, groq_api_key=GROQ_API_KEY, model_name="openai/gpt-oss-20b")
 
-# موديل الرؤية (المدعوم رسمياً في Groq)
-vision_llm = ChatGroq(temperature=0.3, groq_api_key=GROQ_API_KEY, model_name="qwen/qwen3.8-27b")
+# موديل الرؤية (صيغة حديثة)
+vision_llm = ChatGroq(temperature=0.3, groq_api_key=GROQ_API_KEY, model_name="meta-llama/llama-4-scout-17b-16e-instruct")
 
 client = AsyncGroq(api_key=GROQ_API_KEY)
 
-system_prompt = """أنت وكيل ذكاء اصطناعي شخصي، اسمك "سوبر". أنت ودود، تستخدم الإيموجي (😊، 🤔، 📝).
-قواعد:
-1. إذا كان الطلب غامضاً جداً، اسأل "ملخص أم شرح كامل؟".
-2. لا تكرر السؤال إذا اختار المستخدم.
-3. إذا كان الطلب واضحاً، ابدأ فوراً.
-4. لا تصحح أخطاء الإملاء.
-5. قدم الخطوات الطويلة على شكل نقاط وانتظر الموافقة.
-6. لا تستخدم الجداول (|) أو رموز Markdown مثل ** أو ##. استخدم (1، 2، 3) أو (-).
-7. لا تستخدم وسوم HTML.
-8. استخدم لغة عربية سليمة."""
+# تعليمات الشخصية: عامية سعودية ودودة
+system_prompt = """أنت وكيل ذكاء اصطناعي شخصي، اسمك "سوبر". 
+تتكلم بالعامية السعودية/الخليجية البسيطة والودية، وتستخدم الإيموجي (😊، 🤔، 📝، 💡).
+- إذا كان الطلب غامضاً، اسأل: "تبغى ملخص سريع ولا شرح كامل؟".
+- لا تكرر السؤال إذا اختار المستخدم.
+- إذا كان الطلب واضحاً، ابدأ فوراً.
+- لا تصحح أخطاء الإملاء، افهم القصد.
+- قدم الخطوات الطويلة على شكل نقاط (1، 2، 3) وانتظر الموافقة.
+- لا تستخدم الجداول (|) أو رموز Markdown (مثل ** أو ##). استخدم النقاط العادية.
+- لا تستخدم وسوم HTML.
+- استخدم اللهجة السعودية الخفيفة (مثل: "وش تبي"، "تمام"، "أبشر")."""
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
-    await message.answer("أهلاً بك! أنا وكيلك الخارق. أستطيع قراءة PDF، توليد الصور، تحليل الصور والصوت! 🤖✨")
+    await message.answer("هلا والله! أنا وكيلك الخارق. أقدر أقرأ PDF، أطلع صور، وأحلل الصور والصوت. وش تبيني أسوي لك اليوم؟ 🤖✨")
 
-# --- 1. توليد الصور ---
+# --- توليد الصور ---
 async def generate_image(prompt_text):
     encoded_prompt = urllib.parse.quote(prompt_text)
     url = f"https://image.pollinations.ai/prompt/{encoded_prompt}?width=1024&height=1024&nologo=true"
@@ -108,16 +109,16 @@ async def generate_image(prompt_text):
                 return await resp.read()
     return None
 
-# --- 2. قراءة PDF والملخصات ---
+# --- PDF ---
 @dp.message(F.document)
 async def handle_document(message: types.Message):
     user_id = message.from_user.id
     doc = message.document
     if not doc.file_name.lower().endswith('.pdf'):
-        await message.answer("⚠️ أرسل ملف PDF فقط.")
+        await message.answer("عطني ملف PDF بس، الله يعافيك.")
         return
     
-    await message.answer("📄 جاري قراءة الملف وتلخيصه...")
+    await message.answer("طيب، جاري أقرأ الملف وألخصه لك...")
     try:
         file_info = await bot.get_file(doc.file_id)
         downloaded_file = await bot.download_file(file_info.file_path)
@@ -128,35 +129,33 @@ async def handle_document(message: types.Message):
             text += page.extract_text() or ""
         
         if not text.strip():
-            await message.answer("⚠️ الملف لا يحتوي على نص قابل للقراءة.")
+            await message.answer("الملف ما فيه نص واضح، جرب ملف ثاني.")
             return
             
-        prompt = f"لخص هذا النص في نقاط واضحة ومختصرة:\n\n{text[:4000]}"
+        prompt = f"لخص هذا النص في نقاط واضحة ومختصرة بالعامية:\n\n{text[:4000]}"
         response = await llm.ainvoke([{"role": "user", "content": prompt}])
         
-        await message.answer(f"📄 **ملخص الملف:**\n\n{response.content}")
+        await message.answer(f"📄 ملخص الملف:\n\n{response.content}")
     except Exception as e:
         logging.error(f"PDF Error: {e}")
-        await message.answer("⚠️ حدث خطأ في قراءة الملف.")
+        await message.answer("أوه، صار خطأ في قراءة الملف.")
 
-# --- 3. معالجة النصوص (مع الذاكرة) ---
+# --- النصوص ---
 @dp.message(F.text)
 async def handle_text(message: types.Message):
     user_id = message.from_user.id
     user_text = message.text
-    await message.answer("🧠 جاري التفكير...")
+    await message.answer("ثواني أفكر... 🧠")
     try:
-        # التحقق إذا كان المستخدم يطلب صورة
         if any(word in user_text for word in ["ارسم", "صمم", "generate", "image"]):
-            await message.answer("🎨 جاري رسم الصورة...")
+            await message.answer("طيب، جاري أرسم لك... 🎨")
             image_bytes = await generate_image(user_text)
             if image_bytes:
-                await message.answer_photo(types.BufferedInputFile(image_bytes, filename="image.jpg"), caption="🎨 هذه هي الصورة اللي طلبتها!")
+                await message.answer_photo(types.BufferedInputFile(image_bytes, filename="image.jpg"), caption="🎨 خذ الصورة، عساها تعجبك!")
             else:
-                await message.answer("⚠️ فشل توليد الصورة.")
+                await message.answer("عجزت أرسم، جرب وصف ثاني.")
             return
 
-        # الرد العادي مع الذاكرة
         history = await get_history(user_id)
         summary = await get_summary(user_id)
         
@@ -174,46 +173,51 @@ async def handle_text(message: types.Message):
         
         await message.answer(reply)
         
-        # تحديث الملخص كل 10 رسائل
         async with aiosqlite.connect(DB_PATH) as db:
             async with db.execute("SELECT COUNT(*) FROM chat_history WHERE user_id = ?", (user_id,)) as cursor:
                 count = (await cursor.fetchone())[0]
                 if count % 10 == 0:
-                    sum_prompt = f"لخص المحادثة التالية في جملتين:\n{user_text}\n{reply}"
+                    sum_prompt = f"لخص المحادثة التالية في جملتين بالعامية:\n{user_text}\n{reply}"
                     sum_res = await llm.ainvoke([{"role": "user", "content": sum_prompt}])
                     await save_summary(user_id, sum_res.content)
                     
     except Exception as e:
         logging.error(f"Error: {e}")
-        await message.answer("⚠️ حدث خطأ بسيط. جرب مرة ثانية! 💪")
+        await message.answer("أوه، صار خطأ بسيط. جرب مرة ثانية.")
 
-# --- 4. معالجة الصور ---
+# --- الصور ---
 @dp.message(F.photo)
 async def handle_photo(message: types.Message):
     user_id = message.from_user.id
-    await message.answer("🖼️ جاري تحليل الصورة...")
+    await message.answer("جاري أتفرج على الصورة... 🖼️")
     try:
         photo = message.photo[-1]
         file_info = await bot.get_file(photo.file_id)
         downloaded_file = await bot.download_file(file_info.file_path)
+        
+        # تجهيز الصورة كـ Base64
         image_data = base64.b64encode(downloaded_file.read()).decode("utf-8")
         
+        # إرسال الطلب للموديل بالصيغة الصحيحة
         response = await vision_llm.ainvoke([
-            {"role": "user", "content": [
-                {"type": "text", "text": "حلل هذه الصورة واشرح محتواها بالعربية."},
-                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_data}"}}
-            ]}
+            {
+                "role": "user", 
+                "content": [
+                    {"type": "text", "text": "حلل لي هذي الصورة واشرح محتواها بالعامية."},
+                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_data}"}}
+                ]
+            }
         ])
         await message.answer(response.content)
     except Exception as e:
         logging.error(f"Vision Error: {e}")
-        await message.answer("⚠️ لم أستطع تحليل الصورة. تأكد أن حجمها أقل من 20 ميجا.")
+        await message.answer("عجزت أحلل الصورة، جرب صورة ثانية أو تأكد إنها مو كبيرة.")
 
-# --- 5. معالجة الصوت ---
+# --- الصوت ---
 @dp.message(F.voice)
 async def handle_voice(message: types.Message):
     user_id = message.from_user.id
-    await message.answer("🎤 جاري تحويل الصوت إلى نص...")
+    await message.answer("جاري أسمع الرسالة الصوتية... 🎤")
     try:
         file = await bot.get_file(message.voice.file_id)
         buffer = BytesIO()
@@ -223,13 +227,13 @@ async def handle_voice(message: types.Message):
         
         transcription = await client.audio.transcriptions.create(model="whisper-large-v3", file=buffer, language="ar")
         text = transcription.text
-        await message.answer(f"📝 النص: {text}\n\n🧠 جاري التفكير...")
+        await message.answer(f"📝 النص: {text}\n\nثواني أفكر...")
         
         response = await llm.ainvoke([{"role": "user", "content": text}])
         await message.answer(response.content)
     except Exception as e:
         logging.error(f"Voice Error: {e}")
-        await message.answer("⚠️ لم أستطع فهم الصوت.")
+        await message.answer("عجزت أفهم الصوت، جرب مرة ثانية.")
 
 # --- إعداد السيرفر ---
 async def on_startup(app):
@@ -253,7 +257,7 @@ async def main():
     site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()
     
-    print(f"🚀 الوكيل الخارق شغال على المنفذ {port}")
+    print(f"🚀 الوكيل شغال على المنفذ {port}")
     await asyncio.Event().wait()
 
 if __name__ == "__main__":
