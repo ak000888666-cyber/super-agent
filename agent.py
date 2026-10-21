@@ -11,6 +11,7 @@ from aiogram.filters import Command
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler
 from langchain_groq import ChatGroq
 from groq import AsyncGroq
+from langchain_community.tools import DuckDuckGoSearchRun
 from pypdf import PdfReader
 from dotenv import load_dotenv
 import aiohttp as aiohttp_client
@@ -75,30 +76,31 @@ async def save_summary(user_id, summary):
 
 # --- إعداد الذكاء الاصطناعي ---
 llm = ChatGroq(temperature=0.5, groq_api_key=GROQ_API_KEY, model_name="openai/gpt-oss-20b")
-
-# موديل الرؤية (المدعوم رسمياً في Groq)
 vision_llm = ChatGroq(temperature=0.3, groq_api_key=GROQ_API_KEY, model_name="qwen/qwen3.8-27b")
-
 client = AsyncGroq(api_key=GROQ_API_KEY)
 
-# تعليمات الشخصية: عامية سعودية ودودة
+# --- أداة البحث ---
+search_tool = DuckDuckGoSearchRun()
+
+# تعليمات الشخصية (معدلة)
 system_prompt = """أنت وكيل ذكاء اصطناعي شخصي، اسمك "سوبر". 
 تتكلم بالعامية السعودية/الخليجية البسيطة والودية، وتستخدم الإيموجي (😊، 🤔، 📝، 💡).
-- إذا كان الطلب غامضاً، اسأل: "تبغى ملخص سريع ولا شرح كامل؟".
-- لا تكرر السؤال إذا اختار المستخدم.
-- إذا كان الطلب واضحاً، ابدأ فوراً.
-- لا تصحح أخطاء الإملاء، افهم القصد.
-- قدم الخطوات الطويلة على شكل نقاط (1، 2، 3) وانتظر الموافقة.
-- لا تستخدم الجداول (|) أو رموز Markdown (مثل ** أو ##). استخدم النقاط العادية.
-- لا تستخدم وسوم HTML.
-- استخدم اللهجة السعودية الخفيفة (مثل: "وش تبي"، "تمام"، "أبشر")."""
+
+قواعد صارمة:
+1. إذا كان المستخدم يسولف معك (مثل: "أيش أشجع"، "عطني نكتة")، رد عليه بشكل مباشر وودود، ولا تسأله عن "ملخص أو شرح".
+2. إذا كان الطلب يتعلق ببحث أو دراسة أو موضوع طويل، قدم ملخصاً سريعاً في البداية، وفي النهاية اكتب: "تبغى شرح كامل؟".
+3. إذا طلب منك البحث في الإنترنت، استخدم أداة البحث التي لديك.
+4. لا تصحح أخطاء الإملاء.
+5. لا تستخدم الجداول (|) أو رموز Markdown (مثل ** أو ##). استخدم النقاط العادية.
+6. لا تستخدم وسوم HTML.
+7. استخدم اللهجة السعودية الخفيفة."""
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
-    await message.answer("هلا والله! أنا وكيلك الخارق. أقدر أقرأ PDF، أطلع صور، وأحلل الصور والصوت. وش تبيني أسوي لك اليوم؟ 🤖✨")
+    await message.answer("هلا والله! أنا وكيلك الخارق. أقدر أبحث في النت، أقرأ PDF، أطلع صور، وأحلل الصور والصوت. وش تبيني أسوي لك اليوم؟ 🤖✨")
 
 # --- توليد الصور ---
 async def generate_image(prompt_text):
@@ -136,18 +138,19 @@ async def handle_document(message: types.Message):
         prompt = f"لخص هذا النص في نقاط واضحة ومختصرة بالعامية:\n\n{text[:4000]}"
         response = await llm.ainvoke([{"role": "user", "content": prompt}])
         
-        await message.answer(f"📄 ملخص الملف:\n\n{response.content}")
+        await message.answer(f"📄 ملخص الملف:\n\n{response.content}\n\nتبغى شرح كامل؟")
     except Exception as e:
         logging.error(f"PDF Error: {e}")
         await message.answer("أوه، صار خطأ في قراءة الملف.")
 
-# --- النصوص ---
+# --- النصوص (مع البحث) ---
 @dp.message(F.text)
 async def handle_text(message: types.Message):
     user_id = message.from_user.id
     user_text = message.text
     await message.answer("ثواني أفكر... 🧠")
     try:
+        # توليد الصور
         if any(word in user_text for word in ["ارسم", "صمم", "generate", "image"]):
             await message.answer("طيب، جاري أرسم لك... 🎨")
             image_bytes = await generate_image(user_text)
@@ -157,6 +160,20 @@ async def handle_text(message: types.Message):
                 await message.answer("عجزت أرسم، جرب وصف ثاني.")
             return
 
+        # البحث في النت
+        if any(word in user_text for word in ["ابحث", "search", "أخبار", "اخبار", "عن"]):
+            await message.answer("🔍 جاري البحث في النت...")
+            try:
+                search_result = await search_tool.arun(user_text)
+                prompt = f"بناءً على نتائج البحث التالية، لخص الإجابة بالعامية مع كتابة 'تبغى شرح كامل؟' في النهاية:\n\n{search_result}"
+                response = await llm.ainvoke([{"role": "user", "content": prompt}])
+                await message.answer(response.content)
+                return
+            except Exception as e:
+                logging.error(f"Search Error: {e}")
+                await message.answer("عجزت أبحث، جرب سؤال ثاني.")
+
+        # الرد العادي
         history = await get_history(user_id)
         summary = await get_summary(user_id)
         
@@ -174,6 +191,7 @@ async def handle_text(message: types.Message):
         
         await message.answer(reply)
         
+        # تحديث الملخص كل 10 رسائل
         async with aiosqlite.connect(DB_PATH) as db:
             async with db.execute("SELECT COUNT(*) FROM chat_history WHERE user_id = ?", (user_id,)) as cursor:
                 count = (await cursor.fetchone())[0]
@@ -186,7 +204,7 @@ async def handle_text(message: types.Message):
         logging.error(f"Error: {e}")
         await message.answer("أوه، صار خطأ بسيط. جرب مرة ثانية.")
 
-# --- الصور (مع الضغط والموديل الصحيح) ---
+# --- الصور ---
 @dp.message(F.photo)
 async def handle_photo(message: types.Message):
     user_id = message.from_user.id
@@ -196,14 +214,13 @@ async def handle_photo(message: types.Message):
         file_info = await bot.get_file(photo.file_id)
         downloaded_file = await bot.download_file(file_info.file_path)
         
-        # ضغط الصورة قبل الإرسال
         img = Image.open(io.BytesIO(downloaded_file.read()))
-        img.thumbnail((1024, 1024)) # تصغير الأبعاد
+        img.thumbnail((1024, 1024))
         if img.mode != 'RGB':
             img = img.convert('RGB')
         
         buffer = io.BytesIO()
-        img.save(buffer, format="JPEG", quality=85) # ضغط الجودة
+        img.save(buffer, format="JPEG", quality=85)
         compressed_bytes = buffer.getvalue()
         
         image_data = base64.b64encode(compressed_bytes).decode("utf-8")
@@ -220,7 +237,7 @@ async def handle_photo(message: types.Message):
         await message.answer(response.content)
     except Exception as e:
         logging.error(f"Vision Error: {e}")
-        await message.answer("عجزت أحلل الصورة، جرب صورة ثانية أو تأكد إنها مو كبيرة.")
+        await message.answer("عجزت أحلل الصورة، جرب صورة ثانية.")
 
 # --- الصوت ---
 @dp.message(F.voice)
