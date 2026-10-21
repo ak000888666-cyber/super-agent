@@ -2,4 +2,5 @@ aiogram
 python-dotenv
 langchain
 langchain-groq
+langchain-community
 duckduckgo-search
