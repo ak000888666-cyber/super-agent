@@ -11,9 +11,6 @@ from aiogram.filters import Command
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler
 from langchain_groq import ChatGroq
 from groq import AsyncGroq
-from langchain_community.tools import DuckDuckGoSearchRun
-from langchain.agents import create_react_agent, AgentExecutor
-from langchain_core.prompts import PromptTemplate
 from pypdf import PdfReader
 from dotenv import load_dotenv
 import aiohttp as aiohttp_client
@@ -28,7 +25,7 @@ WEBHOOK_HOST = os.getenv("RENDER_EXTERNAL_URL", "https://your-app.onrender.com")
 WEBHOOK_PATH = "/webhook"
 WEBHOOK_URL = f"{WEBHOOK_HOST}{WEBHOOK_PATH}"
 
-# --- قاعدة البيانات (للمحادثات والملخصات) ---
+# --- قاعدة البيانات ---
 DB_PATH = "agent.db"
 
 async def init_db():
@@ -77,21 +74,11 @@ async def save_summary(user_id, summary):
 
 # --- إعداد الذكاء الاصطناعي ---
 llm = ChatGroq(temperature=0.5, groq_api_key=GROQ_API_KEY, model_name="openai/gpt-oss-20b")
-vision_llm = ChatGroq(temperature=0.3, groq_api_key=GROQ_API_KEY, model_name="meta-llama/llama-4-maverick-17b-128e-instruct")
-client = AsyncGroq(api_key=GROQ_API_KEY)
 
-# إعداد أداة البحث (للميزة 2)
-search = DuckDuckGoSearchRun()
-tools = [search]
-prompt = PromptTemplate.from_template("""
-أنت مساعد ذكي. لديك أدوات: {tools}
-أسماء الأدوات: {tool_names}
-استخدم الأداة إذا احتجت معلومات حديثة.
-السؤال: {input}
-{agent_scratchpad}
-""")
-agent = create_react_agent(llm, tools, prompt)
-agent_executor = AgentExecutor(agent=agent, tools=tools, verbose=False, handle_parsing_errors=True)
+# موديل الرؤية (المدعوم رسمياً في Groq)
+vision_llm = ChatGroq(temperature=0.3, groq_api_key=GROQ_API_KEY, model_name="qwen/qwen3.8-27b")
+
+client = AsyncGroq(api_key=GROQ_API_KEY)
 
 system_prompt = """أنت وكيل ذكاء اصطناعي شخصي، اسمك "سوبر". أنت ودود، تستخدم الإيموجي (😊، 🤔، 📝).
 قواعد:
@@ -109,7 +96,7 @@ dp = Dispatcher()
 
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
-    await message.answer("أهلاً بك! أنا وكيلك الخارق. أستطيع قراءة PDF، البحث في النت، توليد الصور، وتحليل الصور والصوت! 🤖✨")
+    await message.answer("أهلاً بك! أنا وكيلك الخارق. أستطيع قراءة PDF، توليد الصور، تحليل الصور والصوت! 🤖✨")
 
 # --- 1. توليد الصور ---
 async def generate_image(prompt_text):
@@ -121,7 +108,7 @@ async def generate_image(prompt_text):
                 return await resp.read()
     return None
 
-# --- 2. قراءة PDF والملخصات (مع الذاكرة الطويلة) ---
+# --- 2. قراءة PDF والملخصات ---
 @dp.message(F.document)
 async def handle_document(message: types.Message):
     user_id = message.from_user.id
@@ -152,7 +139,7 @@ async def handle_document(message: types.Message):
         logging.error(f"PDF Error: {e}")
         await message.answer("⚠️ حدث خطأ في قراءة الملف.")
 
-# --- 3. معالجة النصوص (مع البحث والذاكرة) ---
+# --- 3. معالجة النصوص (مع الذاكرة) ---
 @dp.message(F.text)
 async def handle_text(message: types.Message):
     user_id = message.from_user.id
@@ -168,15 +155,6 @@ async def handle_text(message: types.Message):
             else:
                 await message.answer("⚠️ فشل توليد الصورة.")
             return
-
-        # البحث في النت
-        if any(word in user_text for word in ["ابحث", "search", "أخبار"]):
-            try:
-                result = await agent_executor.ainvoke({"input": user_text})
-                await message.answer(result["output"])
-                return
-            except Exception as e:
-                logging.error(f"Search Error: {e}")
 
         # الرد العادي مع الذاكرة
         history = await get_history(user_id)
@@ -229,7 +207,7 @@ async def handle_photo(message: types.Message):
         await message.answer(response.content)
     except Exception as e:
         logging.error(f"Vision Error: {e}")
-        await message.answer("⚠️ لم أستطع تحليل الصورة.")
+        await message.answer("⚠️ لم أستطع تحليل الصورة. تأكد أن حجمها أقل من 20 ميجا.")
 
 # --- 5. معالجة الصوت ---
 @dp.message(F.voice)
