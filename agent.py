@@ -7,8 +7,6 @@ from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler
 from langchain_groq import ChatGroq
-from langchain.agents import create_agent
-from langchain_community.tools import DuckDuckGoSearchRun
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -54,13 +52,11 @@ async def get_history(user_id, limit=10):
             rows = await cursor.fetchall()
             return [{"role": row["role"], "content": row["content"]} for row in reversed(rows)]
 
-# --- إعداد الذكاء الاصطناعي (تم تغيير الموديل هنا) ---
-llm = ChatGroq(temperature=0.3, groq_api_key=GROQ_API_KEY, model_name="openai/gpt-oss-120b")
-tools = [DuckDuckGoSearchRun()]
-agent = create_agent(
-    model=llm,
-    tools=tools,
-    system_prompt="أنت وكيل ذكاء اصطناعي خارق وشخصي. تجيب على الأسئلة، تبحث في الإنترنت عند الحاجة، وتشرح بذكاء. اكتب الأكواد بين ```."
+# --- إعداد الذكاء الاصطناعي (بدون أدوات) ---
+llm = ChatGroq(
+    temperature=0.3, 
+    groq_api_key=GROQ_API_KEY, 
+    model_name="openai/gpt-oss-120b"
 )
 
 bot = Bot(token=BOT_TOKEN)
@@ -75,7 +71,7 @@ async def handle_message(message: types.Message):
     user_id = message.from_user.id
     user_text = message.text
 
-    await message.answer("🧠 جاري التفكير والبحث...")
+    await message.answer("🧠 جاري التفكير...")
 
     try:
         # جلب السجل السابق من قاعدة البيانات
@@ -84,9 +80,9 @@ async def handle_message(message: types.Message):
         # إضافة رسالة المستخدم للسجل
         history.append({"role": "user", "content": user_text})
         
-        # إرسال الطلب للوكيل مع الذاكرة
-        response = await agent.ainvoke({"messages": history})
-        reply = response["messages"][-1].content
+        # إرسال الطلب للذكاء الاصطناعي مباشرة
+        response = await llm.ainvoke(history)
+        reply = response.content
         
         # حفظ الرد في قاعدة البيانات
         await save_message(user_id, "user", user_text)
