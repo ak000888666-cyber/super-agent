@@ -3,6 +3,7 @@ import logging
 import asyncio
 import aiosqlite
 import base64
+import io
 from io import BytesIO
 from aiohttp import web
 from aiogram import Bot, Dispatcher, types, F
@@ -10,7 +11,13 @@ from aiogram.filters import Command
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler
 from langchain_groq import ChatGroq
 from groq import AsyncGroq
+from langchain_community.tools import DuckDuckGoSearchRun
+from langchain.agents import create_react_agent, AgentExecutor
+from langchain_core.prompts import PromptTemplate
+from pypdf import PdfReader
 from dotenv import load_dotenv
+import aiohttp as aiohttp_client
+import urllib.parse
 
 load_dotenv()
 logging.basicConfig(level=logging.INFO)
@@ -21,7 +28,7 @@ WEBHOOK_HOST = os.getenv("RENDER_EXTERNAL_URL", "https://your-app.onrender.com")
 WEBHOOK_PATH = "/webhook"
 WEBHOOK_URL = f"{WEBHOOK_HOST}{WEBHOOK_PATH}"
 
-# --- قاعدة البيانات ---
+# --- قاعدة البيانات (للمحادثات والملخصات) ---
 DB_PATH = "agent.db"
 
 async def init_db():
@@ -35,42 +42,56 @@ async def init_db():
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS summaries (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL UNIQUE,
+                summary TEXT NOT NULL
+            )
+        """)
         await db.commit()
 
 async def save_message(user_id, role, content):
     async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute(
-            "INSERT INTO chat_history (user_id, role, content) VALUES (?, ?, ?)",
-            (user_id, role, content)
-        )
+        await db.execute("INSERT INTO chat_history (user_id, role, content) VALUES (?, ?, ?)", (user_id, role, content))
         await db.commit()
 
 async def get_history(user_id, limit=6):
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
-        async with db.execute(
-            "SELECT role, content FROM chat_history WHERE user_id = ? ORDER BY id DESC LIMIT ?",
-            (user_id, limit)
-        ) as cursor:
+        async with db.execute("SELECT role, content FROM chat_history WHERE user_id = ? ORDER BY id DESC LIMIT ?", (user_id, limit)) as cursor:
             rows = await cursor.fetchall()
             return [{"role": row["role"], "content": row["content"]} for row in reversed(rows)]
 
+async def get_summary(user_id):
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("SELECT summary FROM summaries WHERE user_id = ?", (user_id,)) as cursor:
+            row = await cursor.fetchone()
+            return row["summary"] if row else "لا يوجد ملخص سابق."
+
+async def save_summary(user_id, summary):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("INSERT OR REPLACE INTO summaries (user_id, summary) VALUES (?, ?)", (user_id, summary))
+        await db.commit()
+
 # --- إعداد الذكاء الاصطناعي ---
-llm = ChatGroq(
-    temperature=0.5, 
-    groq_api_key=GROQ_API_KEY, 
-    model_name="openai/gpt-oss-20b"
-)
-
-# موديل الرؤية (الأقوى حالياً)
-vision_llm = ChatGroq(
-    temperature=0.3,
-    groq_api_key=GROQ_API_KEY,
-    model_name="meta-llama/llama-4-maverick-17b-128e-instruct"
-)
-
-# عميل Groq (للصوت)
+llm = ChatGroq(temperature=0.5, groq_api_key=GROQ_API_KEY, model_name="openai/gpt-oss-20b")
+vision_llm = ChatGroq(temperature=0.3, groq_api_key=GROQ_API_KEY, model_name="meta-llama/llama-4-maverick-17b-128e-instruct")
 client = AsyncGroq(api_key=GROQ_API_KEY)
+
+# إعداد أداة البحث (للميزة 2)
+search = DuckDuckGoSearchRun()
+tools = [search]
+prompt = PromptTemplate.from_template("""
+أنت مساعد ذكي. لديك أدوات: {tools}
+أسماء الأدوات: {tool_names}
+استخدم الأداة إذا احتجت معلومات حديثة.
+السؤال: {input}
+{agent_scratchpad}
+""")
+agent = create_react_agent(llm, tools, prompt)
+agent_executor = AgentExecutor(agent=agent, tools=tools, verbose=False, handle_parsing_errors=True)
 
 system_prompt = """أنت وكيل ذكاء اصطناعي شخصي، اسمك "سوبر". أنت ودود، تستخدم الإيموجي (😊، 🤔، 📝).
 قواعد:
@@ -88,29 +109,107 @@ dp = Dispatcher()
 
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
-    await message.answer("أهلاً بك! أنا وكيلك الذكي الشخصي. اسألني أي شي، أو أرسل لي صورة أو رسالة صوتية! 🤖✨")
+    await message.answer("أهلاً بك! أنا وكيلك الخارق. أستطيع قراءة PDF، البحث في النت، توليد الصور، وتحليل الصور والصوت! 🤖✨")
 
-# --- معالجة النصوص ---
+# --- 1. توليد الصور ---
+async def generate_image(prompt_text):
+    encoded_prompt = urllib.parse.quote(prompt_text)
+    url = f"https://image.pollinations.ai/prompt/{encoded_prompt}?width=1024&height=1024&nologo=true"
+    async with aiohttp_client.ClientSession() as session:
+        async with session.get(url) as resp:
+            if resp.status == 200:
+                return await resp.read()
+    return None
+
+# --- 2. قراءة PDF والملخصات (مع الذاكرة الطويلة) ---
+@dp.message(F.document)
+async def handle_document(message: types.Message):
+    user_id = message.from_user.id
+    doc = message.document
+    if not doc.file_name.lower().endswith('.pdf'):
+        await message.answer("⚠️ أرسل ملف PDF فقط.")
+        return
+    
+    await message.answer("📄 جاري قراءة الملف وتلخيصه...")
+    try:
+        file_info = await bot.get_file(doc.file_id)
+        downloaded_file = await bot.download_file(file_info.file_path)
+        
+        reader = PdfReader(io.BytesIO(downloaded_file.read()))
+        text = ""
+        for page in reader.pages:
+            text += page.extract_text() or ""
+        
+        if not text.strip():
+            await message.answer("⚠️ الملف لا يحتوي على نص قابل للقراءة.")
+            return
+            
+        prompt = f"لخص هذا النص في نقاط واضحة ومختصرة:\n\n{text[:4000]}"
+        response = await llm.ainvoke([{"role": "user", "content": prompt}])
+        
+        await message.answer(f"📄 **ملخص الملف:**\n\n{response.content}")
+    except Exception as e:
+        logging.error(f"PDF Error: {e}")
+        await message.answer("⚠️ حدث خطأ في قراءة الملف.")
+
+# --- 3. معالجة النصوص (مع البحث والذاكرة) ---
 @dp.message(F.text)
 async def handle_text(message: types.Message):
     user_id = message.from_user.id
     user_text = message.text
     await message.answer("🧠 جاري التفكير...")
     try:
+        # التحقق إذا كان المستخدم يطلب صورة
+        if any(word in user_text for word in ["ارسم", "صمم", "generate", "image"]):
+            await message.answer("🎨 جاري رسم الصورة...")
+            image_bytes = await generate_image(user_text)
+            if image_bytes:
+                await message.answer_photo(types.BufferedInputFile(image_bytes, filename="image.jpg"), caption="🎨 هذه هي الصورة اللي طلبتها!")
+            else:
+                await message.answer("⚠️ فشل توليد الصورة.")
+            return
+
+        # البحث في النت
+        if any(word in user_text for word in ["ابحث", "search", "أخبار"]):
+            try:
+                result = await agent_executor.ainvoke({"input": user_text})
+                await message.answer(result["output"])
+                return
+            except Exception as e:
+                logging.error(f"Search Error: {e}")
+
+        # الرد العادي مع الذاكرة
         history = await get_history(user_id)
+        summary = await get_summary(user_id)
+        
         messages = [{"role": "system", "content": system_prompt}]
+        if summary != "لا يوجد ملخص سابق.":
+            messages.append({"role": "system", "content": f"ملخص المحادثات السابقة: {summary}"})
         messages.extend(history)
         messages.append({"role": "user", "content": user_text})
+        
         response = await llm.ainvoke(messages)
         reply = response.content
+        
         await save_message(user_id, "user", user_text)
         await save_message(user_id, "assistant", reply)
+        
         await message.answer(reply)
+        
+        # تحديث الملخص كل 10 رسائل
+        async with aiosqlite.connect(DB_PATH) as db:
+            async with db.execute("SELECT COUNT(*) FROM chat_history WHERE user_id = ?", (user_id,)) as cursor:
+                count = (await cursor.fetchone())[0]
+                if count % 10 == 0:
+                    sum_prompt = f"لخص المحادثة التالية في جملتين:\n{user_text}\n{reply}"
+                    sum_res = await llm.ainvoke([{"role": "user", "content": sum_prompt}])
+                    await save_summary(user_id, sum_res.content)
+                    
     except Exception as e:
         logging.error(f"Error: {e}")
-        await message.answer("⚠️ عذراً، حدث خطأ بسيط. جرب مرة ثانية! 💪")
+        await message.answer("⚠️ حدث خطأ بسيط. جرب مرة ثانية! 💪")
 
-# --- معالجة الصور ---
+# --- 4. معالجة الصور ---
 @dp.message(F.photo)
 async def handle_photo(message: types.Message):
     user_id = message.from_user.id
@@ -123,20 +222,16 @@ async def handle_photo(message: types.Message):
         
         response = await vision_llm.ainvoke([
             {"role": "user", "content": [
-                {"type": "text", "text": "حلل هذه الصورة واشرح محتواها باللغة العربية. إذا كانت تحتوي على نص، اقرأه واشرحه."},
+                {"type": "text", "text": "حلل هذه الصورة واشرح محتواها بالعربية."},
                 {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_data}"}}
             ]}
         ])
-        
-        reply = response.content
-        await save_message(user_id, "user", "[صورة]")
-        await save_message(user_id, "assistant", reply)
-        await message.answer(reply)
+        await message.answer(response.content)
     except Exception as e:
         logging.error(f"Vision Error: {e}")
-        await message.answer("⚠️ عذراً، لم أستطع تحليل الصورة. تأكد من وضوحها وحاول مرة ثانية. 💪")
+        await message.answer("⚠️ لم أستطع تحليل الصورة.")
 
-# --- معالجة الصوت ---
+# --- 5. معالجة الصوت ---
 @dp.message(F.voice)
 async def handle_voice(message: types.Message):
     user_id = message.from_user.id
@@ -148,32 +243,17 @@ async def handle_voice(message: types.Message):
         buffer.name = "voice.ogg"
         buffer.seek(0)
         
-        transcription = await client.audio.transcriptions.create(
-            model="whisper-large-v3",
-            file=buffer,
-            language="ar"
-        )
-        
+        transcription = await client.audio.transcriptions.create(model="whisper-large-v3", file=buffer, language="ar")
         text = transcription.text
         await message.answer(f"📝 النص: {text}\n\n🧠 جاري التفكير...")
         
-        history = await get_history(user_id)
-        messages = [{"role": "system", "content": system_prompt}]
-        messages.extend(history)
-        messages.append({"role": "user", "content": text})
-        
-        response = await llm.ainvoke(messages)
-        reply = response.content
-        
-        await save_message(user_id, "user", f"[صوت] {text}")
-        await save_message(user_id, "assistant", reply)
-        await message.answer(reply)
-        
+        response = await llm.ainvoke([{"role": "user", "content": text}])
+        await message.answer(response.content)
     except Exception as e:
         logging.error(f"Voice Error: {e}")
-        await message.answer("⚠️ عذراً، لم أستطع فهم الصوت. تأكد من وضوح التسجيل وحاول مرة ثانية. 💪")
+        await message.answer("⚠️ لم أستطع فهم الصوت.")
 
-# --- إعداد السيرفر والويب هوك ---
+# --- إعداد السيرفر ---
 async def on_startup(app):
     await init_db()
     await bot.set_webhook(WEBHOOK_URL)
@@ -195,7 +275,7 @@ async def main():
     site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()
     
-    print(f"🚀 الوكيل شغال على المنفذ {port}")
+    print(f"🚀 الوكيل الخارق شغال على المنفذ {port}")
     await asyncio.Event().wait()
 
 if __name__ == "__main__":
