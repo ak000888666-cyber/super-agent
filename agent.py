@@ -204,7 +204,7 @@ async def handle_text(message: types.Message):
         logging.error(f"Error: {e}")
         await message.answer("أوه، صار خطأ بسيط. جرب مرة ثانية.")
 
-# --- الصور ---
+# --- الصور (مع الضغط و max_tokens لمنع خطأ 429) ---
 @dp.message(F.photo)
 async def handle_photo(message: types.Message):
     user_id = message.from_user.id
@@ -214,6 +214,7 @@ async def handle_photo(message: types.Message):
         file_info = await bot.get_file(photo.file_id)
         downloaded_file = await bot.download_file(file_info.file_path)
         
+        # ضغط الصورة
         img = Image.open(io.BytesIO(downloaded_file.read()))
         img.thumbnail((1024, 1024))
         if img.mode != 'RGB':
@@ -225,15 +226,19 @@ async def handle_photo(message: types.Message):
         
         image_data = base64.b64encode(compressed_bytes).decode("utf-8")
         
-        response = await vision_llm.ainvoke([
-            {
-                "role": "user", 
-                "content": [
-                    {"type": "text", "text": "حلل لي هذي الصورة واشرح محتواها بالعامية."},
-                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_data}"}}
-                ]
-            }
-        ])
+        # إرسال الطلب مع max_tokens
+        response = await vision_llm.ainvoke(
+            [
+                {
+                    "role": "user", 
+                    "content": [
+                        {"type": "text", "text": "حلل لي هذي الصورة واشرح محتواها بالعامية."},
+                        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_data}"}}
+                    ]
+                }
+            ],
+            max_tokens=700
+        )
         await message.answer(response.content)
     except Exception as e:
         logging.error(f"Vision Error: {e}")
