@@ -76,8 +76,8 @@ async def save_summary(user_id, summary):
 # --- إعداد الذكاء الاصطناعي ---
 llm = ChatGroq(temperature=0.5, groq_api_key=GROQ_API_KEY, model_name="openai/gpt-oss-20b")
 
-# موديل الرؤية (المدعوم رسمياً للصور)
-vision_llm = ChatGroq(temperature=0.3, groq_api_key=GROQ_API_KEY, model_name="meta-llama/llama-4-scout-17b-16e-instruct")
+# موديل الرؤية (المدعوم رسمياً في Groq)
+vision_llm = ChatGroq(temperature=0.3, groq_api_key=GROQ_API_KEY, model_name="qwen/qwen3.8-27b")
 
 client = AsyncGroq(api_key=GROQ_API_KEY)
 
@@ -186,7 +186,7 @@ async def handle_text(message: types.Message):
         logging.error(f"Error: {e}")
         await message.answer("أوه، صار خطأ بسيط. جرب مرة ثانية.")
 
-# --- الصور (مع الضغط) ---
+# --- الصور (مع الضغط والموديل الصحيح) ---
 @dp.message(F.photo)
 async def handle_photo(message: types.Message):
     user_id = message.from_user.id
