@@ -18,7 +18,7 @@ WEBHOOK_HOST = os.getenv("RENDER_EXTERNAL_URL", "https://your-app.onrender.com")
 WEBHOOK_PATH = "/webhook"
 WEBHOOK_URL = f"{WEBHOOK_HOST}{WEBHOOK_PATH}"
 
-# --- قاعدة البيانات ---
+# --- قاعدة البيانات (لحفظ السجل فقط) ---
 DB_PATH = "agent.db"
 
 async def init_db():
@@ -42,28 +42,18 @@ async def save_message(user_id, role, content):
         )
         await db.commit()
 
-async def get_history(user_id, limit=2):  # رسالتين بس لتجنب أخطاء Groq
-    async with aiosqlite.connect(DB_PATH) as db:
-        db.row_factory = aiosqlite.Row
-        async with db.execute(
-            "SELECT role, content FROM chat_history WHERE user_id = ? ORDER BY id DESC LIMIT ?",
-            (user_id, limit)
-        ) as cursor:
-            rows = await cursor.fetchall()
-            return [{"role": row["role"], "content": row["content"]} for row in reversed(rows)]
-
-# --- إعداد الذكاء الاصطناعي (موديل مستقر + شخصية تفاعلية) ---
+# --- إعداد الذكاء الاصطناعي ---
 llm = ChatGroq(
-    temperature=0.7, # زيادة الإبداع والتفاعل
-    groq_api_key=GROQ_API_KEY,
-    model_name="llama-3.1-8b-instant"
+    temperature=0.7, 
+    groq_api_key=GROQ_API_KEY, 
+    model_name="llama-3.1-8b-instant"  # موديل مستقر
 )
 
 # تعليمات الشخصية (System Prompt)
-system_prompt = """أنت وكيل ذكاء اصطناعي شخصي، اسمك "سوبر" (أو الاسم الذي يطلبه المستخدم). 
+system_prompt = """أنت وكيل ذكاء اصطناعي شخصي، اسمك "سوبر". 
 أنت ودود، متفاعل، وتستخدم الإيموجي المناسبة للموقف (😊، 🤔، 📝، 💡، 🔍). 
 - إذا كان الطلب غير واضح، اسأل المستخدم: "هل تريد ملخصاً سريعاً أم شرحاً كاملاً؟".
-- إذا طلب منك شيئاً لا تستطيع فعله (مثل البحث المباشر أو تشغيل كود)، اعتذر بلطف وقدم بديلاً (مثل: "لا أستطيع البحث المباشر، لكن يمكنني مساعدتك في صياغة سؤالك أو شرح مفهوم البحث").
+- إذا طلب منك شيئاً لا تستطيع فعله (مثل البحث المباشر)، اعتذر بلطف وقدم بديلاً (مثل: "لا أستطيع البحث المباشر، لكن يمكنني مساعدتك في صياغة سؤالك").
 - كن صبوراً، واشرح بأسلوب مبسط. لا تعلق أبداً، وإذا لم تفهم شيئاً، اطلب توضيحاً.
 - إذا طلب منك المستخدم تغيير اسمك، التزم بالاسم الجديد.
 - استخدم لغة عربية سليمة ومنظمة."""
@@ -83,19 +73,17 @@ async def handle_message(message: types.Message):
     await message.answer("🧠 جاري التفكير...")
 
     try:
-        # جلب السجل السابق
-        history = await get_history(user_id)
-        
-        # تجهيز الرسائل مع تعليمات الشخصية
-        messages = [{"role": "system", "content": system_prompt}]
-        messages.extend(history)
-        messages.append({"role": "user", "content": user_text})
+        # إرسال السؤال فقط (بدون تاريخ المحادثة) لتجنب أخطاء Groq
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_text}
+        ]
         
         # إرسال الطلب
         response = await llm.ainvoke(messages)
         reply = response.content
         
-        # حفظ في قاعدة البيانات
+        # حفظ في قاعدة البيانات (للسجل فقط)
         await save_message(user_id, "user", user_text)
         await save_message(user_id, "assistant", reply)
         
