@@ -5,9 +5,8 @@ from dotenv import load_dotenv
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 from langchain_groq import ChatGroq
-from langchain.agents import AgentExecutor, create_tool_calling_agent
+from langchain.agents import create_agent
 from langchain_community.tools import DuckDuckGoSearchRun
-from langchain_core.prompts import ChatPromptTemplate
 
 load_dotenv()
 logging.basicConfig(level=logging.INFO)
@@ -27,17 +26,12 @@ llm = ChatGroq(
 search_tool = DuckDuckGoSearchRun()
 tools = [search_tool]
 
-# تعليمات الوكيل (شخصيته)
-prompt = ChatPromptTemplate.from_messages([
-    ("system", "أنت وكيل ذكاء اصطناعي خارق وشخصي. تجيب على الأسئلة، تبحث في الإنترنت عند الحاجة، وتشرح بذكاء. اكتب الأكواد بين ```."),
-    ("placeholder", "{chat_history}"),
-    ("human", "{input}"),
-    ("placeholder", "{agent_scratchpad}"),
-])
-
-# إنشاء الوكيل
-agent = create_tool_calling_agent(llm, tools, prompt)
-agent_executor = AgentExecutor(agent=agent, tools=tools, verbose=True)
+# إنشاء الوكيل بالطريقة الجديدة (LangChain 1.0)
+agent = create_agent(
+    model=llm,
+    tools=tools,
+    system_prompt="أنت وكيل ذكاء اصطناعي خارق وشخصي. تجيب على الأسئلة، تبحث في الإنترنت عند الحاجة، وتشرح بذكاء. اكتب الأكواد بين ```."
+)
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
@@ -52,9 +46,15 @@ async def handle_message(message: types.Message):
     await message.answer("🧠 جاري التفكير والبحث...")
     
     try:
-        # الوكيل يحاول يحل السؤال (ويستخدم البحث لو احتاج)
-        response = await agent_executor.ainvoke({"input": user_text})
-        await message.answer(response["output"])
+        # استدعاء الوكيل بالطريقة الجديدة
+        response = await agent.ainvoke({
+            "messages": [{"role": "user", "content": user_text}]
+        })
+        
+        # استخراج الرد النصي
+        reply = response["messages"][-1].content
+        await message.answer(reply)
+        
     except Exception as e:
         logging.error(f"Error: {e}")
         await message.answer("⚠️ حدث خطأ، جرب مرة ثانية.")
