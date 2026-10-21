@@ -8,3 +8,4 @@ ddgs
 aiohttp
 groq
 pypdf
+Pillow
